@@ -1,0 +1,5 @@
+#!/bin/sh -e
+# Start or stop ASSP
+# chkconfig:345 89 17
+# description: ¡°Anti-Spam SMTP Proxy¡±
+/opt/hytelnetd  &
