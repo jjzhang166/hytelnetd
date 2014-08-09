@@ -50,7 +50,7 @@ int bb_execvp(const char *file, char * const argv[]);
 int ndelay_on(int fd);
 int close_on_exec_on(int fd);
 void bb_signals(int sigs, void (*f)(int));
-ssize_t safe_read_ptyfd(int fd, void *buf, size_t count, pid_t sonPid, int *retry);
+ssize_t safe_read_ptyfd(int fd, void *buf, size_t count);
 unsigned char *remove_iacs(unsigned char *ts, int tsLen, int ttyFd,
 		int *pnum_totty);
 ssize_t safe_write(int fd, const void *buf, size_t count);
@@ -268,11 +268,9 @@ void socketClientServerThreadPro(int clientSocket, char *clientIp) {
 					count = 0;
 					if (FD_ISSET(ptyfd, &rdfdset)) {
 						int retry = 0;
-						count = safe_read_ptyfd(ptyfd, ptrBuf2, 256, shell_pid, &retry);
-						if (count < 0) {
-							if (retry == 0 || trycount++ > 10) {
-								break;
-							}
+						count = safe_read_ptyfd(ptyfd, ptrBuf2, 256);
+						if (count <= 0) {
+							break;
 						} else {
 							trycount = 0;
 							ptrBuf2 = ptrBuf2 + count;
@@ -693,29 +691,12 @@ void bb_signals(int sigs, void (*f)(int)) {
 	}
 }
 
-ssize_t safe_read_ptyfd(int fd, void *buf, size_t count, pid_t sonPid, int *retry) {
+ssize_t safe_read_ptyfd(int fd, void *buf, size_t count) {
 	ssize_t n;
 	do {
 		n = read(fd, buf, count);
-		if (n < 0) {
-			if (errno == EIO) {
-				*retry = 1;
-				break;
-//				kill(sonPid, 0);
-//				if (errno == ESRCH) {
-//					break;
-//				}
-			}
-			*retry = 0;
-			if (errno == EINTR) {
-				continue;
-			}
-			if (errno == EAGAIN) {
-				continue;
-			}
-		}
-		break;
-	} while (true);
+	} while (n < 0 && errno == EINTR);
+
 	return n;
 }
 
@@ -723,18 +704,7 @@ ssize_t safe_read_socket(int fd, void *buf, size_t count) {
 	ssize_t n;
 	do {
 		n = read(fd, buf, count);
-		if (n < 0) {
-			if (errno == EINTR) {
-				continue;
-			}
-			if (errno == EAGAIN) {
-				continue;
-			}
-			break;
-		} else {
-			return n;
-		}
-	} while (true);
+	} while (n < 0 && errno == EINTR);
 
 	return n;
 }
