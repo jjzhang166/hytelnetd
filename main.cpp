@@ -50,12 +50,12 @@ int bb_execvp(const char *file, char * const argv[]);
 int ndelay_on(int fd);
 int close_on_exec_on(int fd);
 void bb_signals(int sigs, void (*f)(int));
-ssize_t safe_read(int fd, void *buf, size_t count);
+ssize_t safe_read_ptyfd(int fd, void *buf, size_t count);
 unsigned char *remove_iacs(unsigned char *ts, int tsLen, int ttyFd,
 		int *pnum_totty);
 ssize_t safe_write(int fd, const void *buf, size_t count);
 size_t iac_safe_write(int fd, const char *buf, size_t count);
-ssize_t socket_read(int fd, void *buf, size_t bufLen);
+ssize_t safe_read_socket(int fd, void *buf, size_t count);
 int readValue(char *redName, char *value);
 
 const int const_int_1 = 1;
@@ -92,24 +92,20 @@ int socketRecv(int Socket, char *readStr, int readLen) {
 	}
 	return readLen;
 }
-char ttyName[128]; //tty名称
+
 
 int runLinuxShell(char *shellStr) {
 	FILE *fp;
-	char buffer[512];
 	fp = popen(shellStr, "r");
-	//fread(buffer,sizeof(buffer),512,fp);
-	//printf("%s",buffer);
 	pclose(fp);
 	return 0;
 }
+
 void sig_int(int sig) {
-	char strCh[128];
-	//printf("Catch a termination single Pid:%d.\n",getpid());
-	memset(strCh, 0x00, 128);
-	sprintf(strCh, "fuser -k %s", ttyName);
-	runLinuxShell(strCh);
-	//printf("已清除TTY:%s的连接",ttyName);
+//	char strCh[128];
+//	memset(strCh, 0x00, 128);
+//	sprintf(strCh, "fuser -k %s", ttyName);
+//	runLinuxShell(strCh);
 	exit(0);
 	return;
 }
@@ -128,6 +124,7 @@ void socketClientServerThreadPro(int socketId, char *clientIp) {
 	char recvData[512];
 	char strCh[128];
 	char ttyTypeS[8];
+	char ttyName[128]; //tty名称
 
 	int keepAlive = 1;	//设定KeepAlive
 	int keepIdle = 100;	//开始首次KeepAlive探测前的TCP空闭时间
@@ -137,8 +134,8 @@ void socketClientServerThreadPro(int socketId, char *clientIp) {
 	struct timeval timeout;
 	int clientSocket = socketId;	//客户端的socket连接
 
-	int ttyFd;	//pty句柄
-	int ttyret;	//tty句柄
+	int ptyfd;	//pty句柄
+	int ttyfd;	//tty句柄
 	pid_t shell_pid;
 	unsigned char buf1[BUFSIZE];	//接收socket发过来的数据
 	int buf1Len;
@@ -150,7 +147,7 @@ void socketClientServerThreadPro(int socketId, char *clientIp) {
 
 	ptrBuf1 = buf1;
 	ptrBuf2 = buf2;
-	ttyFd = 0;
+	ptyfd = 0;
 
 	buf1Len = 0;
 	buf2Len = 0;
@@ -165,22 +162,17 @@ void socketClientServerThreadPro(int socketId, char *clientIp) {
 	while (1) {
 		//开始线程的工作任务
 		//<1>获取并打开TTY号
-		ttyFd = xgetpty(ttyName, clientIp);
-		if (ttyFd < 0) {
+		ptyfd = xgetpty(ttyName, clientIp);
+		if (ptyfd < 0) {
 			socketSend(clientSocket, "未找到空闲可用的tty设备,请检查分配的tty号是否正确!",
 					strlen("未找到空闲可用的tty设备,请检查分配的tty号是否正确!!"));
 			//printf("打开tty号失败!\n");
-			close(ttyFd);
+			close(ptyfd);
 			close(clientSocket);
-			//continue;
 			exit(0);
 		}
-		//printf("打开tty号成功%s!\n",ttyName);
-		ndelay_on(ttyFd);
-		close_on_exec_on(ttyFd);
-
-		//<2>设置socket状态,保持长连接  // 设置KeepAlive参数
-		//setsockopt(clientSocket, SOL_SOCKET, SO_KEEPALIVE, &const_int_1, sizeof(const_int_1));
+		ndelay_on(ptyfd);
+		close_on_exec_on(ptyfd);
 
 		if (setsockopt(clientSocket, SOL_SOCKET, SO_KEEPALIVE,
 				(void*) &keepAlive, sizeof(keepAlive)) == -1) {
@@ -207,11 +199,8 @@ void socketClientServerThreadPro(int socketId, char *clientIp) {
 		::signal(SIGPIPE, SIG_IGN);		//忽略socket错误产生的SIGPIPE信号,防止进程异常退出
 		::signal(SIGCHLD, SIG_IGN);		//忽略子进程退出信号
 		::signal(SIGSEGV, &sig_int);		//另一端断开
-		pid = fork(); /* NOMMU-friendly */
+		pid = fork();
 		if (pid > 0) {
-			FD_ZERO(&rdfdset);		//可读描述符集合清0
-			FD_ZERO(&wrfdset);		//可写描述符集合清0
-
 			buf1Len = 0;
 			buf2Len = 0;
 			shell_pid = pid;		//子进程的ID
@@ -220,9 +209,9 @@ void socketClientServerThreadPro(int socketId, char *clientIp) {
 				FD_ZERO(&wrfdset);		//可写描述符集合清0
 
 				if (buf1Len > 0) {
-					FD_SET(ttyFd, &wrfdset);		//判断tty是否可写入
-					if (ttyFd > fdMax) {
-						fdMax = ttyFd;
+					FD_SET(ptyfd, &wrfdset);		//判断tty是否可写入
+					if (ptyfd > fdMax) {
+						fdMax = ptyfd;
 					}
 				}
 				if (buf2Len > 0) {
@@ -238,9 +227,9 @@ void socketClientServerThreadPro(int socketId, char *clientIp) {
 					}
 				}
 				if (buf2Len < BUFSIZE) {
-					FD_SET(ttyFd, &rdfdset);		//判断是否可从pty中读取
-					if (ttyFd > fdMax) {
-						fdMax = ttyFd;
+					FD_SET(ptyfd, &rdfdset);		//判断是否可从pty中读取
+					if (ptyfd > fdMax) {
+						fdMax = ptyfd;
 					}
 				}
 				//socket是否有读写，超时时间30秒
@@ -254,8 +243,6 @@ void socketClientServerThreadPro(int socketId, char *clientIp) {
 				count = select(fdMax + 1, &rdfdset, &wrfdset, NULL, &timeout);
 				if (count == 0) {
 					//说明超时
-					//printf("等待超时\n");
-					//向客户端发送，查询指令，查询客户端是否还在,如果不在则关闭连接，挂起
 					continue;
 				} else if (count <= 0) {
 					//说明出错
@@ -263,9 +250,9 @@ void socketClientServerThreadPro(int socketId, char *clientIp) {
 					kill(shell_pid, SIGKILL);
 					waitpid(shell_pid, NULL, 0);
 					//关闭当前的pty号
-					close(ttyret);
+					close(ttyfd);
 					//关闭当前的tty号
-					close(ttyFd);
+					close(ptyfd);
 					//关闭socket连接
 					close(clientSocket);
 					memset(strCh, 0x00, 128);
@@ -279,71 +266,40 @@ void socketClientServerThreadPro(int socketId, char *clientIp) {
 					//判断sokcket是否有可读数据，如果有则把数据读出放入buf1
 					count = 0;
 					memset(str, 0x00, 256);
-					//sprintf(str,"socket num is:\n");
-					//printf(str);
-					if (clientSocket == 0) {
-						//break;
-					}
 					if (FD_ISSET(clientSocket, &rdfdset)) {
 						//printf("<1>从socket中读取数据\n");
 						memset(recvData, 0x00, 512);
-						count = socket_read(clientSocket, recvData, 256);//向buf1中读入socket发来数据
+						count = safe_read_socket(clientSocket, recvData, 256);//向buf1中读入socket发来数据
 						memcpy(ptrBuf1, recvData, count);
-						//printf("socket的状态值:%d\n",count);
 						if (count <= 0) {
 							break;					//关闭当前连接
 						} else {
-							//printf("<1>从socket中读出数据%s\n",ptrBuf1);
 							ptrBuf1 = ptrBuf1 + count;
 							buf1Len = buf1Len + count;
-							//printf("读取socket后,buf1中的数据%s\n",buf1);
 						}
 					}
 					//判断pty是否可以读出数据，如果有则把数据读出到buf2
 					count = 0;
-					//判断login子进程是否已经退出，如果退出则当前线程也退出
-					/*childPid=waitpid(this->shell_pid,NULL,WNOHANG);
-					 if(childPid==this->shell_pid)
-					 {
-					 //printf("子进程已经退出\n");
-					 break;
-					 }*/
-					if (FD_ISSET(ttyFd, &rdfdset)) {
-						//printf("<2>从tty中读取数据\n");
-						count = safe_read(ttyFd, ptrBuf2, 256);
-						//printf("2--------->\n");
-						//printf("ttyFd的状态值\n");
+					if (FD_ISSET(ptyfd, &rdfdset)) {
+						count = safe_read_ptyfd(ptyfd, ptrBuf2, 256);
 						if (count <= 0) {
 							break;						//关闭当前连接
 						} else {
-							//printf("<2>从TTY中读出数据%s,长度:%d,stlen长度:%d\n",ptrBuf2,count,strlen((char *)ptrBuf2));
 							ptrBuf2 = ptrBuf2 + count;
 							buf2Len = buf2Len + count;
-							//printf("读取pty后，buf2中的数据%s 长度:%d\n",buf2,buf2Len);
 						}
 					}
-					//printf("3--------->\n");
 					//判断pty是否可以写入数据，如果可以则把buf1写入pty1
 					count = 0;
-					//判断login子进程是否已经退出，如果退出则当前线程也退出
-					/*childPid=waitpid(this->shell_pid,NULL,WNOHANG);
-					 if(childPid==this->shell_pid)
-					 {
-					 printf("子进程已经退出\n");
-					 break;
-					 }*/
-					if ((FD_ISSET(ttyFd, &wrfdset)) && (buf1Len > 0)) {
+					if ((FD_ISSET(ptyfd, &wrfdset)) && (buf1Len > 0)) {
 						int num_totty;
 						unsigned char *ptr;
 						//printf("<3>向TTY中写入数据\n");
 						ptr = remove_iacs((unsigned char *) buf1, buf1Len,
-								ttyFd, &num_totty);					//去掉特殊字符
-						count = safe_write(ttyFd, ptr, num_totty);
+								ptyfd, &num_totty);					//去掉特殊字符
+						count = safe_write(ptyfd, ptr, num_totty);
 						if (count < 0) {
-							if (errno == EAGAIN)			//应用程序现在没有数据可写请稍后再试
-							{
-
-							} else {
+							if (errno != EAGAIN) {//应用程序现在没有数据可写请稍后再试
 								break;					//关闭当前连接
 							}
 						} else {
@@ -362,44 +318,30 @@ void socketClientServerThreadPro(int socketId, char *clientIp) {
 						//printf("<4>向socket中写入数据\n");
 						count = iac_safe_write(clientSocket, (char *) buf2,
 								buf2Len);
-						//count = safe_write(clientSocket,buf2,buf2Len);//把buf2中的数据写入到socket中
 						if (count < 0) {
-							if (errno == EAGAIN)			//如果不能写入，则继续下一步检查
-							{
-
-							} else {
+							if (errno != EAGAIN) {			//如果不能写入，则继续下一步检查
 								break;					//关闭当前连接
 							}
 						} else {
-							//printf("<4>向socket中写入数据后%s\n",buf2);
 							memcpy(LsStr, buf2 + count, buf2Len - count);
 							buf2Len = buf2Len - count;
-							//memset(buf2,0x00,BUFSIZE);
 							memcpy(buf2, LsStr, buf2Len);
 							ptrBuf2 = buf2 + buf2Len;
-							//printf("写入socket后，buf2中的数据%s\n",buf2);
 						}
 					}
 				}
-
-				//如果连接断开则break，关闭当前连接，挂起当前线程，
-				//break;
 			}
 			//交互完成后把login子进程kill掉
 			kill(shell_pid, SIGKILL);
 			waitpid(shell_pid, NULL, 0);
-			//关闭当前的pty号
-			close(ttyret);
-			//关闭当前的tty号
-			close(ttyFd);
-			//关闭socket连接
+			close(ttyfd);
+			close(ptyfd);
 			close(clientSocket);
 			continue;
 		}
 		if (pid < 0) {
-			//创建子进程失败
-			close(ttyret);
-			close(ttyFd);
+			close(ttyfd);
+			close(ptyfd);
 			close(clientSocket);
 			continue;
 		}
@@ -407,7 +349,6 @@ void socketClientServerThreadPro(int socketId, char *clientIp) {
 		//子进程开始执行
 		//设置TTY模式环境变量(读配置文件)
 		memset(ttyTypeS, 0x00, 7);
-		//sprintf(ttyTypeS,"vt100");
 		readValue("vttype", ttyTypeS);
 		memset(strCh, 0x00, 128);
 		memcpy(strCh, ttyTypeS, 5);
@@ -423,7 +364,7 @@ void socketClientServerThreadPro(int socketId, char *clientIp) {
 		xdup2(0, 2);
 		pid = getpid();
 		tcsetpgrp(0, pid); /* switch this tty's process group to us */
-		ttyret = ret;
+		ttyfd = ret;
 		//<5>设定终端的参数
 		tcgetattr(0, &termbuf);
 		termbuf.c_lflag |= ECHO; /* if we use readline we dont want this */
@@ -439,7 +380,6 @@ void socketClientServerThreadPro(int socketId, char *clientIp) {
 		;
 		login_argv[1] = '\0';
 		bb_execvp("/bin/login", (char **) login_argv);
-		//printf("工作线程完成:%d!\n",id);
 	}
 }
 //主监听线程
@@ -531,7 +471,6 @@ void socketMainThread::execute() {
 			//启动工作系统失败,向前端发送失败信息
 			continue;//返回继续监听
 		}
-
 	}
 	//向主进程发信号，让主进程退出
 	pthread_cond_signal(&mainCond);
@@ -776,23 +715,41 @@ void bb_signals(int sigs, void (*f)(int)) {
 		bit <<= 1;
 	}
 }
-ssize_t safe_read(int fd, void *buf, size_t count) {
+ssize_t safe_read_ptyfd(int fd, void *buf, size_t count) {
 	ssize_t n;
 	do {
 		n = read(fd, buf, count);
 	} while (n < 0 && errno == EINTR);
 	return n;
 }
-ssize_t socket_read(int fd, void *buf, size_t bufLen) {
+
+ssize_t safe_read_socket(int fd, void *buf, size_t bufLen) {
 	ssize_t n;
 	do {
-		//printf("读取数据_开始\n");
 		n = recv(fd, buf, bufLen, 0);
-		//printf("读取数据_结束\n");
 	} while (n < 0 && errno == EINTR);
-
 	return n;
 }
+
+//ssize_t safe_read_socket(int fd, void *buf, size_t count) {
+//	ssize_t n;
+//	do {
+//		n = read(fd, buf, count);
+//		if (n < 0) {
+//			if (errno == EINTR) {
+//				continue;
+//			}
+//			if (errno == EAGAIN) {
+//				continue;
+//			}
+//			break;
+//		} else {
+//			return n;
+//		}
+//	} while (true);
+//
+//	return n;
+//}
 
 unsigned char *remove_iacs(unsigned char *ts, int tsLen, int ttyFd,
 		int *pnum_totty) {
