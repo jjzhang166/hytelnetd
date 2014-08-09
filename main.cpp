@@ -50,7 +50,7 @@ int bb_execvp(const char *file, char * const argv[]);
 int ndelay_on(int fd);
 int close_on_exec_on(int fd);
 void bb_signals(int sigs, void (*f)(int));
-ssize_t safe_read_ptyfd(int fd, void *buf, size_t count);
+ssize_t safe_read_ptyfd(int fd, void *buf, size_t count, pid_t sonPid, int *retry);
 unsigned char *remove_iacs(unsigned char *ts, int tsLen, int ttyFd,
 		int *pnum_totty);
 ssize_t safe_write(int fd, const void *buf, size_t count);
@@ -204,6 +204,7 @@ void socketClientServerThreadPro(int socketId, char *clientIp) {
 			buf1Len = 0;
 			buf2Len = 0;
 			shell_pid = pid;		//子进程的ID
+			int trycount = 0;
 			while (1) {
 				FD_ZERO(&rdfdset);		//可读描述符集合清0
 				FD_ZERO(&wrfdset);		//可写描述符集合清0
@@ -242,25 +243,17 @@ void socketClientServerThreadPro(int socketId, char *clientIp) {
 
 				count = select(fdMax + 1, &rdfdset, &wrfdset, NULL, &timeout);
 				if (count == 0) {
-					//说明超时
 					continue;
-				} else if (count <= 0) {
-					//说明出错
-					//printf("socket出错:\n");
+				} else if (count < 0) {
 					kill(shell_pid, SIGKILL);
 					waitpid(shell_pid, NULL, 0);
-					//关闭当前的pty号
 					close(ttyfd);
-					//关闭当前的tty号
 					close(ptyfd);
-					//关闭socket连接
 					close(clientSocket);
-					memset(strCh, 0x00, 128);
-					sprintf(strCh, "fuser -k %s", ttyName);
-					runLinuxShell(strCh);
-					//break;
+//					memset(strCh, 0x00, 128);
+//					sprintf(strCh, "fuser -k %s", ttyName);
+//					runLinuxShell(strCh);
 					exit(0);
-					//continue;
 				} else {
 					//有读写数据
 					//判断sokcket是否有可读数据，如果有则把数据读出放入buf1
@@ -281,10 +274,14 @@ void socketClientServerThreadPro(int socketId, char *clientIp) {
 					//判断pty是否可以读出数据，如果有则把数据读出到buf2
 					count = 0;
 					if (FD_ISSET(ptyfd, &rdfdset)) {
-						count = safe_read_ptyfd(ptyfd, ptrBuf2, 256);
-						if (count <= 0) {
-							break;						//关闭当前连接
+						int retry = 0;
+						count = safe_read_ptyfd(ptyfd, ptrBuf2, 256, shell_pid, &retry);
+						if (count < 0) {
+							if (retry == 0 || trycount++ > 10) {
+								break;
+							}
 						} else {
+							trycount = 0;
 							ptrBuf2 = ptrBuf2 + count;
 							buf2Len = buf2Len + count;
 						}
@@ -483,8 +480,6 @@ void releaseChildPro(int sig) {
 }
 
 int main() {
-	char strChar[256];
-
 	::signal(SIGCHLD, &releaseChildPro);			//忽略子进程退出信号
 
 	//创建监听线程，并启动监听
@@ -556,21 +551,11 @@ int ReadALine(char *fileName, char *ipAddr, int screenId, char *ptyName) {
 }
 
 int xgetpty(char *line, char *nowClientIp) {
-	int i;
 	int p;
 	struct stat stb;
-	int j;
 	int num = 1;
 	int rv = 0;
 	char ptyName[16];
-	FILE *fp = NULL;
-	char strChar[64];
-	char buffer[512];
-	struct tsession *ts;
-	unsigned char telCmd[8];
-	int readCount = 0;
-
-	int count = 0;
 
 	strcpy(line, "/dev/ptyXX");
 
@@ -581,7 +566,6 @@ int xgetpty(char *line, char *nowClientIp) {
 	//查找8 个屏号循环8次
 	for (num = 1; num <= 8; num++) {
 		rv = ReadALine("/etc/hy_tty.cfg", nowClientIp, num, ptyName + 5);
-		//printf("ptyName is :%s\n",ptyName);
 		if (rv != 0) {
 			continue;
 		} else {
@@ -715,41 +699,52 @@ void bb_signals(int sigs, void (*f)(int)) {
 		bit <<= 1;
 	}
 }
-ssize_t safe_read_ptyfd(int fd, void *buf, size_t count) {
+
+ssize_t safe_read_ptyfd(int fd, void *buf, size_t count, pid_t sonPid, int *retry) {
 	ssize_t n;
 	do {
 		n = read(fd, buf, count);
-	} while (n < 0 && errno == EINTR);
+		if (n < 0) {
+			if (errno == EIO) {
+				*retry = 1;
+				break;
+//				kill(sonPid, 0);
+//				if (errno == ESRCH) {
+//					break;
+//				}
+			}
+			*retry = 0;
+			if (errno == EINTR) {
+				continue;
+			}
+			if (errno == EAGAIN) {
+				continue;
+			}
+		}
+		break;
+	} while (true);
 	return n;
 }
 
-ssize_t safe_read_socket(int fd, void *buf, size_t bufLen) {
+ssize_t safe_read_socket(int fd, void *buf, size_t count) {
 	ssize_t n;
 	do {
-		n = recv(fd, buf, bufLen, 0);
-	} while (n < 0 && errno == EINTR);
+		n = read(fd, buf, count);
+		if (n < 0) {
+			if (errno == EINTR) {
+				continue;
+			}
+			if (errno == EAGAIN) {
+				continue;
+			}
+			break;
+		} else {
+			return n;
+		}
+	} while (true);
+
 	return n;
 }
-
-//ssize_t safe_read_socket(int fd, void *buf, size_t count) {
-//	ssize_t n;
-//	do {
-//		n = read(fd, buf, count);
-//		if (n < 0) {
-//			if (errno == EINTR) {
-//				continue;
-//			}
-//			if (errno == EAGAIN) {
-//				continue;
-//			}
-//			break;
-//		} else {
-//			return n;
-//		}
-//	} while (true);
-//
-//	return n;
-//}
 
 unsigned char *remove_iacs(unsigned char *ts, int tsLen, int ttyFd,
 		int *pnum_totty) {

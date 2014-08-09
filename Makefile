@@ -21,6 +21,7 @@ uninstall:
 	rm -f /etc/hy_tty.cfg
 	rm -f /etc/init.d/hyteld
 	rm -f /opt/$(target)
+	rm -f /var/log/$(target).log
 
 #	ngcbs yjdlzyyd
 start:
