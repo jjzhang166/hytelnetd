@@ -112,7 +112,7 @@ void sig_int(int sig) {
 
 //客户端服务进程执行过程实现
 //
-void socketClientServerThreadPro(int socketId, char *clientIp) {
+void socketClientServerThreadPro(int clientSocket, char *clientIp) {
 	char str[256];
 	int pid = 0;
 	int ret = 0;
@@ -132,7 +132,6 @@ void socketClientServerThreadPro(int socketId, char *clientIp) {
 	int keepCount = 3;	//判定断开前的KeepAlive探测次数
 
 	struct timeval timeout;
-	int clientSocket = socketId;	//客户端的socket连接
 
 	int ptyfd;	//pty句柄
 	int ttyfd;	//tty句柄
@@ -158,15 +157,12 @@ void socketClientServerThreadPro(int socketId, char *clientIp) {
 	/*IAC, DO, TELOPT_LFLOW,*/
 	IAC, WILL, TELOPT_ECHO,
 	IAC, WILL, TELOPT_SGA };
-	//printf("工作线程开启!\n");
+
 	while (1) {
-		//开始线程的工作任务
-		//<1>获取并打开TTY号
 		ptyfd = xgetpty(ttyName, clientIp);
 		if (ptyfd < 0) {
 			socketSend(clientSocket, "未找到空闲可用的tty设备,请检查分配的tty号是否正确!",
 					strlen("未找到空闲可用的tty设备,请检查分配的tty号是否正确!!"));
-			//printf("打开tty号失败!\n");
 			close(ptyfd);
 			close(clientSocket);
 			exit(0);
@@ -191,11 +187,9 @@ void socketClientServerThreadPro(int socketId, char *clientIp) {
 		//<3>告诉前端
 		if (socketSend(clientSocket, iacs_to_send, sizeof(iacs_to_send))
 				== -1) {
-			//printf("发送失败!\n");
 		}
 		//关闭
 		fflush(NULL);
-		//bb_signals((1 << SIGCHLD) + (1 << SIGPIPE), SIG_DFL);
 		::signal(SIGPIPE, SIG_IGN);		//忽略socket错误产生的SIGPIPE信号,防止进程异常退出
 		::signal(SIGCHLD, SIG_IGN);		//忽略子进程退出信号
 		::signal(SIGSEGV, &sig_int);		//另一端断开
@@ -260,7 +254,6 @@ void socketClientServerThreadPro(int socketId, char *clientIp) {
 					count = 0;
 					memset(str, 0x00, 256);
 					if (FD_ISSET(clientSocket, &rdfdset)) {
-						//printf("<1>从socket中读取数据\n");
 						memset(recvData, 0x00, 512);
 						count = safe_read_socket(clientSocket, recvData, 256);//向buf1中读入socket发来数据
 						memcpy(ptrBuf1, recvData, count);
