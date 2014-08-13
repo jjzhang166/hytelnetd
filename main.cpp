@@ -50,12 +50,13 @@ int bb_execvp(const char *file, char * const argv[]);
 int ndelay_on(int fd);
 int close_on_exec_on(int fd);
 void bb_signals(int sigs, void (*f)(int));
-ssize_t safe_read_ptyfd(int fd, void *buf, size_t count, pid_t sonPid, int *retry);
-unsigned char *remove_iacs(unsigned char *ts, int tsLen, int ttyFd,
+ssize_t SafeReadPtyfd(int fd, void *buf, size_t count, pid_t sonPid,
+		int *retry);
+unsigned char *RemoveIacs(unsigned char *ts, int tsLen, int ttyFd,
 		int *pnum_totty);
-ssize_t safe_write(int fd, const void *buf, size_t count);
-size_t iac_safe_write(int fd, const char *buf, size_t count);
-ssize_t safe_read_socket(int fd, void *buf, size_t count);
+ssize_t SafeWrite(int fd, const void *buf, size_t count);
+size_t IacSafeWrite(int fd, const char *buf, size_t count);
+ssize_t SafeReadSocket(int fd, void *buf, size_t count);
 int readValue(char *redName, char *value);
 
 const int const_int_1 = 1;
@@ -92,7 +93,6 @@ int socketRecv(int Socket, char *readStr, int readLen) {
 	}
 	return readLen;
 }
-
 
 int runLinuxShell(char *shellStr) {
 	FILE *fp;
@@ -204,28 +204,20 @@ void socketClientServerThreadPro(int clientSocket, char *clientIp) {
 				FD_ZERO(&wrfdset);		//可写描述符集合清0
 
 				if (buf1Len > 0) {
-					FD_SET(ptyfd, &wrfdset);		//判断tty是否可写入
-					if (ptyfd > fdMax) {
-						fdMax = ptyfd;
-					}
+					FD_SET(ptyfd, &wrfdset);
+					fdMax = ptyfd > fdMax ? ptyfd : fdMax;
 				}
 				if (buf2Len > 0) {
-					FD_SET(clientSocket, &wrfdset);		//判断socket是否可写入
-					if (clientSocket > fdMax) {
-						fdMax = clientSocket;
-					}
+					FD_SET(clientSocket, &wrfdset);
+					fdMax = clientSocket > fdMax ? clientSocket : fdMax;
 				}
 				if (buf1Len < BUFSIZE) {
-					FD_SET(clientSocket, &rdfdset);		//判断socket是否可读
-					if (clientSocket > fdMax) {
-						fdMax = clientSocket;
-					}
+					FD_SET(clientSocket, &rdfdset);
+					fdMax = clientSocket > fdMax ? clientSocket : fdMax;
 				}
 				if (buf2Len < BUFSIZE) {
-					FD_SET(ptyfd, &rdfdset);		//判断是否可从pty中读取
-					if (ptyfd > fdMax) {
-						fdMax = ptyfd;
-					}
+					FD_SET(ptyfd, &rdfdset);
+					fdMax = ptyfd > fdMax ? ptyfd : fdMax;
 				}
 				//socket是否有读写，超时时间30秒
 				count = 0;
@@ -255,7 +247,7 @@ void socketClientServerThreadPro(int clientSocket, char *clientIp) {
 					memset(str, 0x00, 256);
 					if (FD_ISSET(clientSocket, &rdfdset)) {
 						memset(recvData, 0x00, 512);
-						count = safe_read_socket(clientSocket, recvData, 256);//向buf1中读入socket发来数据
+						count = SafeReadSocket(clientSocket, recvData, 256);//向buf1中读入socket发来数据
 						memcpy(ptrBuf1, recvData, count);
 						if (count <= 0) {
 							break;					//关闭当前连接
@@ -268,7 +260,8 @@ void socketClientServerThreadPro(int clientSocket, char *clientIp) {
 					count = 0;
 					if (FD_ISSET(ptyfd, &rdfdset)) {
 						int retry = 0;
-						count = safe_read_ptyfd(ptyfd, ptrBuf2, 256, shell_pid, &retry);
+						count = SafeReadPtyfd(ptyfd, ptrBuf2, 256, shell_pid,
+								&retry);
 						if (count < 0) {
 							if (retry == 0 || trycount++ > 10) {
 								break;
@@ -285,11 +278,11 @@ void socketClientServerThreadPro(int clientSocket, char *clientIp) {
 						int num_totty;
 						unsigned char *ptr;
 						//printf("<3>向TTY中写入数据\n");
-						ptr = remove_iacs((unsigned char *) buf1, buf1Len,
-								ptyfd, &num_totty);					//去掉特殊字符
-						count = safe_write(ptyfd, ptr, num_totty);
+						ptr = RemoveIacs((unsigned char *) buf1, buf1Len, ptyfd,
+								&num_totty);					//去掉特殊字符
+						count = SafeWrite(ptyfd, ptr, num_totty);
 						if (count < 0) {
-							if (errno != EAGAIN) {//应用程序现在没有数据可写请稍后再试
+							if (errno != EAGAIN) {			//应用程序现在没有数据可写请稍后再试
 								break;					//关闭当前连接
 							}
 						} else {
@@ -306,7 +299,7 @@ void socketClientServerThreadPro(int clientSocket, char *clientIp) {
 					count = 0;
 					if ((FD_ISSET(clientSocket, &wrfdset)) && (buf2Len > 0)) {
 						//printf("<4>向socket中写入数据\n");
-						count = iac_safe_write(clientSocket, (char *) buf2,
+						count = IacSafeWrite(clientSocket, (char *) buf2,
 								buf2Len);
 						if (count < 0) {
 							if (errno != EAGAIN) {			//如果不能写入，则继续下一步检查
@@ -468,12 +461,12 @@ void socketMainThread::execute() {
 
 socketMainThread *pMainTemp = NULL;
 
-void releaseChildPro(int sig) {
+void childexit(int sig) {
 	waitpid(-1, NULL, WNOHANG);
 }
 
 int main() {
-	::signal(SIGCHLD, &releaseChildPro);			//忽略子进程退出信号
+	::signal(SIGCHLD, &childexit);			//忽略子进程退出信号
 
 	//创建监听线程，并启动监听
 	pMainTemp = new socketMainThread(0);
@@ -693,7 +686,8 @@ void bb_signals(int sigs, void (*f)(int)) {
 	}
 }
 
-ssize_t safe_read_ptyfd(int fd, void *buf, size_t count, pid_t sonPid, int *retry) {
+ssize_t SafeReadPtyfd(int fd, void *buf, size_t count, pid_t sonPid,
+		int *retry) {
 	ssize_t n;
 	do {
 		n = read(fd, buf, count);
@@ -719,7 +713,7 @@ ssize_t safe_read_ptyfd(int fd, void *buf, size_t count, pid_t sonPid, int *retr
 	return n;
 }
 
-ssize_t safe_read_socket(int fd, void *buf, size_t count) {
+ssize_t SafeReadSocket(int fd, void *buf, size_t count) {
 	ssize_t n;
 	do {
 		n = read(fd, buf, count);
@@ -739,7 +733,7 @@ ssize_t safe_read_socket(int fd, void *buf, size_t count) {
 	return n;
 }
 
-unsigned char *remove_iacs(unsigned char *ts, int tsLen, int ttyFd,
+unsigned char *RemoveIacs(unsigned char *ts, int tsLen, int ttyFd,
 		int *pnum_totty) {
 	unsigned char *ptr0 = ts;
 	unsigned char *ptr = ptr0;
@@ -811,7 +805,7 @@ unsigned char *remove_iacs(unsigned char *ts, int tsLen, int ttyFd,
 	/* Move chars meant for the terminal towards the end of the buffer */
 	return (unsigned char *) memmove(ptr - num_totty, ptr0, num_totty);
 }
-ssize_t safe_write(int fd, const void *buf, size_t count) {
+ssize_t SafeWrite(int fd, const void *buf, size_t count) {
 	ssize_t n;
 
 	do {
@@ -820,7 +814,7 @@ ssize_t safe_write(int fd, const void *buf, size_t count) {
 
 	return n;
 }
-size_t iac_safe_write(int fd, const char *buf, size_t count) {
+size_t IacSafeWrite(int fd, const char *buf, size_t count) {
 	const char *IACptr;
 	size_t wr, rc, total;
 
@@ -830,7 +824,7 @@ size_t iac_safe_write(int fd, const char *buf, size_t count) {
 			return total;
 		if (*buf == (char) IAC) {
 			const char IACIAC[] = { IAC, IAC };
-			rc = safe_write(fd, IACIAC, 2);
+			rc = SafeWrite(fd, IACIAC, 2);
 			if (rc != 2)
 				break;
 			buf++;
@@ -843,7 +837,7 @@ size_t iac_safe_write(int fd, const char *buf, size_t count) {
 		wr = count;
 		if (IACptr)
 			wr = IACptr - buf;
-		rc = safe_write(fd, buf, wr);
+		rc = SafeWrite(fd, buf, wr);
 		if (rc != wr)
 			break;
 		buf += rc;
